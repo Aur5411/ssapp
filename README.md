@@ -1,5 +1,3 @@
-# 小说论坛 App（Discuz! X3.4 客户端）
-
 一个基于 **Android WebView** 的 Discuz! X3.4 小说论坛壳应用。当前版本 **v1.9.78**。
 
 ## 功能总览
