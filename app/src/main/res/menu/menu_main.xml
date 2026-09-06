@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_stop"
+        android:title="停止"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_refresh"
+        android:title="刷新"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_home"
+        android:title="返回首页"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_downloads"
+        android:title="下载文件"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_history"
+        android:title="历史记录"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_debug"
+        android:title="诊断日志"
+        app:showAsAction="never" />
+    <item
+        android:id="@+id/action_settings"
+        android:title="设置"
+        app:showAsAction="never" />
+</menu>

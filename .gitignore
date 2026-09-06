@@ -1,0 +1,23 @@
+# ===== 敏感文件（严禁上传）=====
+# 签名密钥与密码
+*.keystore
+keystore.properties
+
+# 本机 SDK 路径
+local.properties
+
+# ===== 构建产物 / 缓存 =====
+.gradle/
+build/
+app/build/
+captures/
+*.apk
+*.aab
+
+# ===== IDE =====
+.idea/
+*.iml
+.DS_Store
+
+# ===== 日志 =====
+*.log

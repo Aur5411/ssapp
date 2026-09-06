@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/readerRoot"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="#FFFFFF">
+
+    <ScrollView
+        android:id="@+id/readerScroll"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:scrollbars="vertical"
+        android:background="#FFFFFF">
+
+        <TextView
+            android:id="@+id/tvContent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="18dp"
+            android:saveEnabled="false"
+            android:textColor="#1E293B"
+            android:textSize="18sp"
+            android:lineSpacingMultiplier="1.4" />
+    </ScrollView>
+
+    <LinearLayout
+        android:id="@+id/bottomBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="#F8FAFC"
+        android:paddingStart="10dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="10dp"
+        android:paddingBottom="10dp"
+        android:elevation="4dp"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <Button
+                android:id="@+id/btnPrevChapter"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/reader_btn_bg"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="上一章"
+                android:textColor="#1E293B"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnNextChapter"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/reader_btn_bg"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="下一章"
+                android:textColor="#1E293B"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <Button
+                android:id="@+id/btnTheme"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/reader_btn_bg"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="背景"
+                android:textColor="#1E293B"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnFontMinus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/reader_btn_bg"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="A-"
+                android:textColor="#1E293B"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnFontPlus"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/reader_btn_bg"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="A+"
+                android:textColor="#1E293B"
+                android:textSize="14sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <Button
+                android:id="@+id/btnLineSpacing"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:background="@drawable/reader_btn_bg"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="行距"
+                android:textColor="#1E293B"
+                android:textSize="14sp" />
+
+            <Button
+                android:id="@+id/btnCatalog"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="6dp"
+                android:background="@drawable/reader_btn_bg"
+                android:minHeight="0dp"
+                android:minWidth="0dp"
+                android:text="目录"
+                android:textColor="#1E293B"
+                android:textSize="14sp" />
+        </LinearLayout>
+    </LinearLayout>
+</LinearLayout>
