@@ -136,6 +136,12 @@ class ReaderActivity : AppCompatActivity() {
     private val scrollHandler = Handler(Looper.getMainLooper())
     private var lastPageTime = 0L
 
+    /** 邻近章节预取缓存：滑动接近章末/章首时提前后台读好相邻页文本，触底切换即时无等待 */
+    private val pageCache = java.util.concurrent.ConcurrentHashMap<Int, String>()
+    @Volatile private var prefetchRunning = false
+    private val prefetchHandler = Handler(Looper.getMainLooper())
+    private val prefetchRunnable = Runnable { runPrefetchAdjacent() }
+
     private var currentThemeIndex = 0
     private var textSize = 18f
     private var lineSpacing = 1.4f
@@ -206,6 +212,15 @@ class ReaderActivity : AppCompatActivity() {
             scrollHandler.removeCallbacksAndMessages(null)
             val atTop = scrollY <= 8
             val atBottom = scrollY + scrollView.height >= tvContent.height - 8
+
+            // 接近章节末/首即提前预取相邻章，触底切换时缓存已就绪（消除等待、让切章更顺滑）
+            val contentH = tvContent.height
+            if (contentH > 0) {
+                val nearBottom = scrollY > (contentH - scrollView.height) * 0.7
+                val nearTop = scrollY < contentH * 0.15
+                if (nearBottom || nearTop) schedulePrefetch()
+            }
+
             if (atTop || atBottom) {
                 scrollHandler.postDelayed({
                     if (pageLoading) return@postDelayed
@@ -587,6 +602,19 @@ class ReaderActivity : AppCompatActivity() {
         val requestId = ++pageRequestId
         updatePageLabel(target)
 
+        // 命中预取缓存：直接在主线程渲染，切换即时顺滑（无重新读文件的等待）
+        val cached = pageCache.remove(target)
+        if (cached != null) {
+            pageLoading = false
+            if (isActivityDead() || requestId != pageRequestId) return
+            currentPageRawText = cached
+            renderText()
+            lastPageTime = System.currentTimeMillis()
+            applyPagePosition(scrollToBottom, chapterTitle)
+            savePosition()
+            return
+        }
+
         Thread {
             val text = readPage(source, target)
             runOnUiThread {
@@ -596,14 +624,58 @@ class ReaderActivity : AppCompatActivity() {
                 currentPageRawText = text
                 renderText()
                 lastPageTime = System.currentTimeMillis()
-                if (chapterTitle != null) {
-                    scrollView.post { scrollToChapterTitle(chapterTitle) }
-                } else if (scrollToBottom) {
-                    scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
-                } else {
-                    scrollView.post { scrollView.scrollTo(0, 0) }
-                }
+                applyPagePosition(scrollToBottom, chapterTitle)
                 savePosition()
+            }
+        }.start()
+    }
+
+    /** 渲染完成后把阅读器定位到目标位置（章节标题 / 底部 / 顶部）。 */
+    private fun applyPagePosition(scrollToBottom: Boolean, chapterTitle: String?) {
+        if (chapterTitle != null) {
+            scrollView.post { scrollToChapterTitle(chapterTitle) }
+        } else if (scrollToBottom) {
+            scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
+        } else {
+            scrollView.post { scrollView.scrollTo(0, 0) }
+        }
+    }
+
+    /** 预取相邻章节到缓存：滑动接近章末/章首时由滚动监听触发，后台读好供切换即时使用。 */
+    private fun schedulePrefetch() {
+        prefetchHandler.removeCallbacks(prefetchRunnable)
+        prefetchHandler.postDelayed(prefetchRunnable, 120L)
+    }
+
+    private fun runPrefetchAdjacent() {
+        val src = readerSource ?: return
+        if (pageLoading || prefetchRunning) return
+        prefetchRunning = true
+        val cur = currentPageIndex
+        Thread {
+            try {
+                // 优先取当前页前/后各一页；超大章时两者都要，便于向上向下都顺滑
+                val wants = intArrayOf(cur + 1, cur - 1)
+                var added = 0
+                for (p in wants) {
+                    if (p in 0 until (src.pageStarts.size - 1)) {
+                        if (pageCache.containsKey(p) || (p == cur)) continue
+                        val text = readPage(src, p)
+                        if (text.isNotEmpty()) {
+                            pageCache[p] = text
+                            added++
+                        }
+                    }
+                    if (added >= 2) break
+                }
+                // 防止缓存无限增长：超过 6 页则清掉非相邻页
+                if (pageCache.size > 6) {
+                    val keep = setOf(cur - 1, cur, cur + 1)
+                    pageCache.keys.removeIf { it !in keep }
+                }
+            } catch (_: Throwable) {
+            } finally {
+                prefetchRunning = false
             }
         }.start()
     }
