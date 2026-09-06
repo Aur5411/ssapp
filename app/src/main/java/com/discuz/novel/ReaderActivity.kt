@@ -28,14 +28,14 @@ import java.nio.ByteBuffer
 import java.nio.charset.CharacterCodingException
 import java.nio.charset.Charset
 import java.nio.charset.CodingErrorAction
-import kotlin.math.roundToInt
 
 /**
- * 内置 TXT 阅读器（分块流式读取版，避免大文件 OOM 闪退）。
+ * 内置 TXT 阅读器（连续滚动版，避免大文件 OOM 闪退）。
  *
- * 全文按「每页 16K 字符」分页，翻页时才按需读取对应字符块并渲染，内存恒定，
- * 源文件上限 128MB。上下滑动翻页：页内滚动，到底/到顶翻页。支持背景、字号、
- * 行距、段距（文字档位）、目录定位、阅读位置记忆。支持 UTF-8、UTF-16、GBK。
+ * 章节按「章节对齐」切分，但阅读采用「连续滚动窗口」：向下滚近底部自动把下一章拼进
+ * 当前文本、向上滚近顶部自动前插上一章，章节之间无缝衔接、无整块重渲染的跳变。
+ * 窗口过大时裁掉远离阅读位置的远端章并精确补偿滚动位置，内存恒定。支持背景、字号、
+ * 行距、目录定位、阅读位置记忆。支持 UTF-8、UTF-16、GBK。
  */
 class ReaderActivity : AppCompatActivity() {
 
@@ -59,10 +59,11 @@ class ReaderActivity : AppCompatActivity() {
         private const val PREFACE_MIN_CHARS = 2000
         // 章节标题间隔小于此字符数视为「目录」密集排列，跳过目录
         private const val MIN_CHAPTER_GAP = 200
-        // 相邻两个「章节标题」间隔小于此字符数，判定前者是「卷/部」级空壳容器（其标题后紧跟更细的章/正文标题）。
-        // 这种容器若单独成页会得到极短空页（如"第一卷\n"后紧跟"第一章"仅隔几字），打开即"只见几字且翻不动"，
-        // 因此从正文分页中剔除，让实际正文章节落在页首。
+        // 相邻两个「章节标题」间隔小于此字符数，判定前者是「卷/部」级空壳容器
         private const val CONTAINER_MIN_GAP = 60
+
+        // 连续滚动窗口最多保留的页(章)数，超过则裁剪远端
+        private const val MAX_WINDOW_PAGES = 20
 
         private const val PAGE_PADDING_DP = 18
     }
@@ -126,21 +127,25 @@ class ReaderActivity : AppCompatActivity() {
     private val chapters = mutableListOf<Chapter>()
     private var readerSource: ReaderSource? = null
     private var pageCount = 0
+    // 当前「主阅读章」：视口顶部所在的页索引（用于进度保存 / 目录高亮 / 标题）
     private var currentPageIndex = 0
-    private var currentPageRawText = ""
-    private var currentPageChapterOffsets: List<Pair<String, Int>> = emptyList()
+
+    // 连续滚动窗口：[winStart..winEnd] 的页(章)文本已拼接在 windowRaw 中
+    private var winStart = 0
+    private var winEnd = 0
+    private val windowRaw = StringBuilder()
+    // 窗口内每页在 windowRaw 中的起始字符偏移（长度 = 窗口页数 + 1，末项为总长）
+    private val winPageStarts = mutableListOf<Int>()
+    // 窗口渲染后识别到的章节标题及其在渲染文本中的字符偏移
+    private var windowChapterOffsets: List<Pair<String, Int>> = emptyList()
+
     private var loadThread: Thread? = null
-    @Volatile private var pageLoading = false
+    @Volatile private var windowLoading = false
     @Volatile private var pageRequestId = 0L
     @Volatile private var destroyed = false
     private val scrollHandler = Handler(Looper.getMainLooper())
     private var lastPageTime = 0L
-
-    /** 邻近章节预取缓存：滑动接近章末/章首时提前后台读好相邻页文本，触底切换即时无等待 */
-    private val pageCache = java.util.concurrent.ConcurrentHashMap<Int, String>()
-    @Volatile private var prefetchRunning = false
-    private val prefetchHandler = Handler(Looper.getMainLooper())
-    private val prefetchRunnable = Runnable { runPrefetchAdjacent() }
+    private var lastChapterSyncTime = 0L
 
     private var currentThemeIndex = 0
     private var textSize = 18f
@@ -207,31 +212,26 @@ class ReaderActivity : AppCompatActivity() {
         // 长按选中文字复制（系统默认选择模式）
         setupTextSelection()
 
-        // 上下滑动翻页：滚到顶部/底部停止后自动翻页（防抖 + 回跳保护）
+        // 连续滚动：接近窗口底部/顶部时动态加载相邻章，跨章无缝
         scrollView.setOnScrollChangeListener { _, _, scrollY, _, _ ->
             scrollHandler.removeCallbacksAndMessages(null)
-            val atTop = scrollY <= 8
-            val atBottom = scrollY + scrollView.height >= tvContent.height - 8
-
-            // 接近章节末/首即提前预取相邻章，触底切换时缓存已就绪（消除等待、让切章更顺滑）
-            val contentH = tvContent.height
-            if (contentH > 0) {
-                val nearBottom = scrollY > (contentH - scrollView.height) * 0.7
-                val nearTop = scrollY < contentH * 0.15
-                if (nearBottom || nearTop) schedulePrefetch()
-            }
-
-            if (atTop || atBottom) {
+            val nearBottom = scrollY + scrollView.height >= tvContent.height - scrollView.height / 2
+            val nearTop = scrollY <= scrollView.height / 2
+            if (nearBottom || nearTop) {
                 scrollHandler.postDelayed({
-                    if (pageLoading) return@postDelayed
-                    if (System.currentTimeMillis() - lastPageTime < 800) return@postDelayed
-                    if (scrollView.scrollY <= 8) {
-                        if (currentPageIndex > 0) requestPage(currentPageIndex - 1, scrollToBottom = true)
-                    } else {
-                        if (currentPageIndex + 1 < pageCount) requestPage(currentPageIndex + 1, scrollToBottom = false)
+                    if (windowLoading) return@postDelayed
+                    if (System.currentTimeMillis() - lastPageTime < 250) return@postDelayed
+                    if (scrollView.scrollY + scrollView.height >= tvContent.height - scrollView.height / 2) {
+                        appendNext()
+                    } else if (scrollView.scrollY <= scrollView.height / 2) {
+                        prependPrev()
                     }
-                }, 150)
+                }, 80)
             }
+            // 滚动停止后同步当前章（目录高亮 / 进度）
+            scrollHandler.postDelayed({
+                if (System.currentTimeMillis() - lastChapterSyncTime > 200) syncCurrentChapter()
+            }, 200)
         }
 
         val uri = intent.getStringExtra(EXTRA_URI)
@@ -252,7 +252,7 @@ class ReaderActivity : AppCompatActivity() {
                         )
                         val startPage = if (saved in 0 until pageCount) saved else 0
                         currentPageIndex = startPage
-                        requestPage(startPage, scrollToBottom = false)
+                        openWindow(startPage, scrollToBottom = false, chapterTitle = null)
                     }
                 }
             }
@@ -377,7 +377,6 @@ class ReaderActivity : AppCompatActivity() {
             val title = lineBuf.toString()
             if (chapterTitles.size < MAX_CHAPTERS && isChapterTitle(title)) {
                 chapterStarts.add(lineStart)
-                // 用与渲染完全一致的处理（\u00A0→空格 + trim 全角空格），保证跳转时文本能精确匹配
                 chapterTitles.add(title.replace('\u00A0', ' ').trim { isIndentChar(it) })
             }
             lineBuf.setLength(0)
@@ -401,7 +400,6 @@ class ReaderActivity : AppCompatActivity() {
                             lineStart = total
                         }
                         else -> {
-                            // BOM 计入字符偏移（与 readPage 的 skip 对齐），但不进行缓冲污染标题
                             if (ch != '\uFEFF' && lineBuf.length < MAX_LINE_BUF) lineBuf.append(ch)
                         }
                     }
@@ -429,8 +427,7 @@ class ReaderActivity : AppCompatActivity() {
             bodyTitles = chapterTitles.subList(bodyStartIndex, chapterTitles.size)
         }
 
-        // 剔除「卷/部」级空壳容器标题：某标题与下一个标题相距极短（说明它是容器，正文在其后一章才开始），
-        // 则它不应单独占一页。反复剔除直到无过近相邻标题，避免连续多级容器（卷→部→章）层层留壳。
+        // 剔除「卷/部」级空壳容器标题
         var bs = bodyStarts
         var bt = bodyTitles
         if (bs.size >= 2) {
@@ -441,7 +438,6 @@ class ReaderActivity : AppCompatActivity() {
                 val keptT = mutableListOf<String>()
                 var i = 0
                 while (i < bs.size) {
-                    // 当前标题与下一个标题过近 → 当前是空壳容器，剔除
                     if (i < bs.size - 1 && bs[i + 1] - bs[i] < CONTAINER_MIN_GAP) {
                         i++
                         changed = true
@@ -456,23 +452,20 @@ class ReaderActivity : AppCompatActivity() {
         bodyStarts = bs
         bodyTitles = bt
 
-        // 章节对齐分页：跳过过短的前言（广告/书名等），让章节标题落在页首、打开直接进正文
+        // 章节对齐分页
         val pageStarts = mutableListOf<Long>()
         val chapters = mutableListOf<Chapter>()
         val firstStart = bodyStarts.firstOrNull()
 
         if (firstStart == null) {
-            // 无章节：整个文件一页
             pageStarts.add(0L)
             pageStarts.add(total)
         } else if (firstStart >= PREFACE_MIN_CHARS) {
-            // 前言足够长：前言是页 0，第一章是页 1
             pageStarts.add(0L)
             pageStarts.addAll(bodyStarts)
             pageStarts.add(total)
             bodyTitles.forEachIndexed { j, t -> chapters.add(Chapter(t, j + 1)) }
         } else {
-            // 前言很短或第一个章节在文件开头：跳过前言，第一章是页 0
             pageStarts.addAll(bodyStarts)
             pageStarts.add(total)
             bodyTitles.forEachIndexed { j, t -> chapters.add(Chapter(t, j)) }
@@ -578,164 +571,154 @@ class ReaderActivity : AppCompatActivity() {
         }
     }
 
-    // ---------------- 翻页 ----------------
+    // ---------------- 连续窗口加载 ----------------
 
-    private fun requestPage(index: Int, scrollToBottom: Boolean, chapterTitle: String? = null) {
+    /** 以 centerPage 为中心建立窗口（初始含 center 与下一章），后台读、主线程渲染。 */
+    private fun openWindow(centerPage: Int, scrollToBottom: Boolean, chapterTitle: String?) {
         val source = readerSource ?: return
-        if (pageLoading) return
-        val target = index.coerceIn(0, pageCount.coerceAtLeast(0))
-
-        // 目标页 == 当前页且有内容：直接滚动，不重新读
-        if (target == currentPageIndex && currentPageRawText.isNotEmpty()) {
-            if (chapterTitle != null) {
-                scrollView.post { scrollToChapterTitle(chapterTitle) }
-            } else if (scrollToBottom) {
-                scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
-            } else {
-                scrollView.post { scrollView.scrollTo(0, 0) }
-            }
-            return
-        }
-
-        pageLoading = true
-        currentPageIndex = target
+        if (windowLoading) return
+        val center = centerPage.coerceIn(0, pageCount.coerceAtLeast(0))
+        val end = (center + 1).coerceAtMost(pageCount.coerceAtLeast(0))
+        windowLoading = true
+        currentPageIndex = center
+        updatePageLabel(center)
         val requestId = ++pageRequestId
-        updatePageLabel(target)
-
-        // 命中预取缓存：直接在主线程渲染，切换即时顺滑（无重新读文件的等待）
-        val cached = pageCache.remove(target)
-        if (cached != null) {
-            pageLoading = false
-            if (isActivityDead() || requestId != pageRequestId) return
-            currentPageRawText = cached
-            renderText()
-            lastPageTime = System.currentTimeMillis()
-            applyPagePosition(scrollToBottom, chapterTitle)
-            savePosition()
-            return
-        }
-
         Thread {
-            val text = readPage(source, target)
+            val sb = StringBuilder()
+            val starts = mutableListOf<Int>()
+            for (p in center..end) {
+                val t = readPage(source, p)
+                if (t.isEmpty()) continue
+                if (sb.isNotEmpty()) sb.append('\n')
+                starts.add(sb.length)
+                sb.append(t)
+            }
+            starts.add(sb.length)
             runOnUiThread {
-                pageLoading = false
-                if (isActivityDead()) return@runOnUiThread
-                if (requestId != pageRequestId) return@runOnUiThread // 过期请求丢弃
-                currentPageRawText = text
-                renderText()
+                windowLoading = false
+                if (isActivityDead() || requestId != pageRequestId) return@runOnUiThread
+                winStart = center
+                winEnd = center + starts.size - 2
+                windowRaw.setLength(0)
+                windowRaw.append(sb)
+                winPageStarts.clear()
+                winPageStarts.addAll(starts)
+                renderWindow()
                 lastPageTime = System.currentTimeMillis()
-                applyPagePosition(scrollToBottom, chapterTitle)
+                if (chapterTitle != null) {
+                    scrollView.post { scrollToChapterTitle(chapterTitle) }
+                } else if (scrollToBottom) {
+                    scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
+                } else {
+                    scrollView.post { scrollView.scrollTo(0, 0) }
+                }
                 savePosition()
             }
         }.start()
     }
 
-    /** 渲染完成后把阅读器定位到目标位置（章节标题 / 底部 / 顶部）。 */
-    private fun applyPagePosition(scrollToBottom: Boolean, chapterTitle: String?) {
-        if (chapterTitle != null) {
-            scrollView.post { scrollToChapterTitle(chapterTitle) }
-        } else if (scrollToBottom) {
-            scrollView.post { scrollView.fullScroll(View.FOCUS_DOWN) }
-        } else {
-            scrollView.post { scrollView.scrollTo(0, 0) }
-        }
-    }
-
-    /** 预取相邻章节到缓存：滑动接近章末/章首时由滚动监听触发，后台读好供切换即时使用。 */
-    private fun schedulePrefetch() {
-        prefetchHandler.removeCallbacks(prefetchRunnable)
-        prefetchHandler.postDelayed(prefetchRunnable, 120L)
-    }
-
-    private fun runPrefetchAdjacent() {
-        val src = readerSource ?: return
-        if (pageLoading || prefetchRunning) return
-        prefetchRunning = true
-        val cur = currentPageIndex
+    /** 向下续读：把下一章拼进窗口末尾（无缝，无需滚动补偿）。 */
+    private fun appendNext() {
+        val source = readerSource ?: return
+        if (windowLoading) return
+        val next = winEnd + 1
+        if (next > pageCount.coerceAtLeast(0)) return
+        windowLoading = true
+        val requestId = ++pageRequestId
         Thread {
-            try {
-                // 优先取当前页前/后各一页；超大章时两者都要，便于向上向下都顺滑
-                val wants = intArrayOf(cur + 1, cur - 1)
-                var added = 0
-                for (p in wants) {
-                    if (p in 0 until (src.pageStarts.size - 1)) {
-                        if (pageCache.containsKey(p) || (p == cur)) continue
-                        val text = readPage(src, p)
-                        if (text.isNotEmpty()) {
-                            pageCache[p] = text
-                            added++
-                        }
-                    }
-                    if (added >= 2) break
-                }
-                // 防止缓存无限增长：超过 6 页则清掉非相邻页
-                if (pageCache.size > 6) {
-                    val keep = setOf(cur - 1, cur, cur + 1)
-                    pageCache.keys.removeIf { it !in keep }
-                }
-            } catch (_: Throwable) {
-            } finally {
-                prefetchRunning = false
+            val text = readPage(source, next)
+            runOnUiThread {
+                windowLoading = false
+                if (isActivityDead() || requestId != pageRequestId) return@runOnUiThread
+                if (text.isEmpty()) return@runOnUiThread
+                if (windowRaw.isNotEmpty()) windowRaw.append('\n')
+                val newStart = windowRaw.length
+                windowRaw.append(text)
+                winEnd = next
+                winPageStarts[winPageStarts.size - 1] = newStart
+                winPageStarts.add(windowRaw.length)
+                renderWindow()
+                lastPageTime = System.currentTimeMillis()
+                trimWindowIfNeeded()
             }
         }.start()
     }
 
-    /** 滚动到指定章节标题所在行，让章节名显示在屏幕顶部。 */
-    private fun scrollToChapterTitle(title: String) {
-        scrollToChapterTitleInternal(title, 0)
-    }
-
-    private fun scrollToChapterTitleInternal(title: String, retry: Int) {
-        val layout = tvContent.layout
-        if (layout == null) {
-            // 布局尚未完成（首次跳转的时序问题），等下一轮再试
-            if (retry < 10) {
-                tvContent.post { scrollToChapterTitleInternal(title, retry + 1) }
+    /** 向上回读：把上一章前插到窗口开头，并用高度差补偿滚动位置保持视觉不跳。 */
+    private fun prependPrev() {
+        val source = readerSource ?: return
+        if (windowLoading) return
+        val prev = winStart - 1
+        if (prev < 0) return
+        windowLoading = true
+        val requestId = ++pageRequestId
+        Thread {
+            val text = readPage(source, prev)
+            runOnUiThread {
+                windowLoading = false
+                if (isActivityDead() || requestId != pageRequestId) return@runOnUiThread
+                if (text.isEmpty()) return@runOnUiThread
+                val oldH = tvContent.height
+                windowRaw.insert(0, text + "\n")
+                winStart = prev
+                // 平移已有各页起始偏移 + 新页起始 0
+                val added = text.length + 1
+                for (i in winPageStarts.indices) winPageStarts[i] = winPageStarts[i] + added
+                winPageStarts.add(0, 0)
+                renderWindow()
+                lastPageTime = System.currentTimeMillis()
+                tvContent.post {
+                    val newH = tvContent.height
+                    scrollView.scrollBy(0, (newH - oldH).coerceAtLeast(0))
+                }
+                trimWindowIfNeeded()
             }
-            return
-        }
-        // 优先用渲染时记录的精确偏移，避免 indexOf 匹配到正文中的重复文本
-        val recorded = currentPageChapterOffsets.firstOrNull { it.first == title }?.second
-        val index = recorded ?: tvContent.text.indexOf(title)
-        if (index < 0) {
-            scrollView.scrollTo(0, 0)
-            return
-        }
-        val line = layout.getLineForOffset(index)
-        // getLineTop 是相对 TextView 内容区（padding 内）的偏移，实际滚动需加上 paddingTop
-        val y = layout.getLineTop(line) + tvContent.paddingTop
-        scrollView.scrollTo(0, y.coerceAtLeast(0))
+        }.start()
     }
 
-    private fun updatePageLabel(page: Int) {
-        supportActionBar?.subtitle = if (pageCount > 1) "第 ${page + 1} / $pageCount 页" else null
-    }
-
-    private fun gotoPrevChapter() {
-        if (currentPageIndex > 0) {
-            requestPage(currentPageIndex - 1, scrollToBottom = false)
+    /** 窗口过大时裁掉远离阅读位置的远端页，并精确补偿滚动位置。 */
+    private fun trimWindowIfNeeded() {
+        val pages = winEnd - winStart + 1
+        if (pages <= MAX_WINDOW_PAGES) return
+        val contentH = tvContent.height
+        if (contentH <= 0) return
+        val viewCenter = scrollView.scrollY + scrollView.height / 2
+        if (viewCenter < contentH / 2) {
+            // 阅读位置偏上：裁掉末尾一页
+            val lastStart = winPageStarts[winPageStarts.size - 2]
+            if (lastStart <= 0 || lastStart >= windowRaw.length) return
+            windowRaw.setLength(lastStart)
+            winEnd--
+            winPageStarts.removeAt(winPageStarts.size - 2)
+            winPageStarts[winPageStarts.size - 1] = windowRaw.length
+            renderWindow()
         } else {
-            Toast.makeText(this, "已经是第一章", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun gotoNextChapter() {
-        if (currentPageIndex + 1 < pageCount) {
-            requestPage(currentPageIndex + 1, scrollToBottom = false)
-        } else {
-            Toast.makeText(this, "已经是最后一章", Toast.LENGTH_SHORT).show()
+            // 阅读位置偏下：裁掉开头一页，补偿滚动
+            val cutEnd = winPageStarts[1]
+            if (cutEnd <= 0 || cutEnd >= windowRaw.length) return
+            val oldH = contentH
+            windowRaw.delete(0, cutEnd)
+            winStart++
+            winPageStarts.removeAt(0)
+            for (i in winPageStarts.indices) winPageStarts[i] = winPageStarts[i] - cutEnd
+            winPageStarts[winPageStarts.size - 1] = windowRaw.length
+            renderWindow()
+            tvContent.post {
+                scrollView.scrollBy(0, -(oldH - tvContent.height).coerceAtLeast(0))
+            }
         }
     }
 
     // ---------------- 渲染 ----------------
 
-    private fun renderText() {
-        if (currentPageRawText.isEmpty()) {
+    private fun renderWindow() {
+        if (windowRaw.isEmpty()) {
             tvContent.text = if (pageCount == 0) "文件为空" else ""
+            windowChapterOffsets = emptyList()
             return
         }
-        val rendered = addParagraphIndent(currentPageRawText)
-        currentPageChapterOffsets = rendered.chapterOffsets
+        val rendered = addParagraphIndent(windowRaw.toString())
+        windowChapterOffsets = rendered.chapterOffsets
         tvContent.setText(rendered.content, TextView.BufferType.SPANNABLE)
     }
 
@@ -746,7 +729,6 @@ class ReaderActivity : AppCompatActivity() {
         val offsets = mutableListOf<Pair<String, Int>>()
         for (para in paragraphs) {
             if (para.isEmpty()) {
-                // 段落分隔标记（原始空行）：保留空行，让段落/场景清晰
                 sb.append('\n')
                 continue
             }
@@ -796,7 +778,6 @@ class ReaderActivity : AppCompatActivity() {
             val trimmed = line.trim()
             if (trimmed.isEmpty()) {
                 flushBlock()
-                // 原始空行：作为段落分隔标记保留
                 if (paragraphs.isNotEmpty() && paragraphs.last().isNotEmpty()) {
                     paragraphs.add("")
                 }
@@ -830,7 +811,6 @@ class ReaderActivity : AppCompatActivity() {
                     isChapterTitle(value) || isChapterTitle(previous?.text.orEmpty()) ||
                     isStandaloneLine(value) || isStandaloneLine(previous?.text.orEmpty()) ||
                     line.hasLeadingIndent ||
-                    // 对话/新句边界：仅在非硬换行合并时生效（硬换行里以引号开头的行是段落延续，不应断开）
                     (!mergeWrappedLines && (startsDialogue(value) ||
                         (endsSentence(previous?.text) && looksLikeNewSentence(value)) ||
                         shouldKeepLineBreak(previous?.text, value)))
@@ -940,6 +920,86 @@ class ReaderActivity : AppCompatActivity() {
     private fun needsJoinSpace(left: Char, right: Char): Boolean =
         left.isLetterOrDigit() && right.isLetterOrDigit() && (left.code < 128 || right.code < 128)
 
+    // ---------------- 章节定位 ----------------
+
+    /** 滚动到指定章节标题所在行，让章节名显示在屏幕顶部。 */
+    private fun scrollToChapterTitle(title: String) {
+        scrollToChapterTitleInternal(title, 0)
+    }
+
+    private fun scrollToChapterTitleInternal(title: String, retry: Int) {
+        val layout = tvContent.layout
+        if (layout == null) {
+            if (retry < 10) {
+                tvContent.post { scrollToChapterTitleInternal(title, retry + 1) }
+            }
+            return
+        }
+        val recorded = windowChapterOffsets.firstOrNull { it.first == title }?.second
+        val index = recorded ?: tvContent.text.indexOf(title)
+        if (index < 0) {
+            scrollView.scrollTo(0, 0)
+            return
+        }
+        val line = layout.getLineForOffset(index)
+        val y = layout.getLineTop(line) + tvContent.paddingTop
+        scrollView.scrollTo(0, y.coerceAtLeast(0))
+    }
+
+    private fun updatePageLabel(page: Int) {
+        supportActionBar?.subtitle = if (pageCount > 1) "第 ${page + 1} / $pageCount 章" else null
+    }
+
+    private fun gotoPrevChapter() {
+        if (currentPageIndex <= 0) {
+            Toast.makeText(this, "已经是第一章", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val target = currentPageIndex - 1
+        val title = chapters.firstOrNull { it.pageIndex == target }?.title
+        if (title != null && target in winStart..winEnd && windowChapterOffsets.any { it.first == title }) {
+            scrollView.post { scrollToChapterTitle(title) }
+        } else {
+            openWindow(target, scrollToBottom = false, chapterTitle = title)
+        }
+    }
+
+    private fun gotoNextChapter() {
+        if (currentPageIndex + 1 >= pageCount) {
+            Toast.makeText(this, "已经是最后一章", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val target = currentPageIndex + 1
+        val title = chapters.firstOrNull { it.pageIndex == target }?.title
+        if (title != null && target in winStart..winEnd && windowChapterOffsets.any { it.first == title }) {
+            scrollView.post { scrollToChapterTitle(title) }
+        } else {
+            openWindow(target, scrollToBottom = false, chapterTitle = title)
+        }
+    }
+
+    /** 滚动停止后：根据视口顶部所在位置同步当前章（用于目录高亮与进度保存）。 */
+    private fun syncCurrentChapter() {
+        val layout = tvContent.layout ?: return
+        if (windowChapterOffsets.isEmpty()) return
+        val topY = scrollView.scrollY
+        val line = layout.getLineForVertical(topY)
+        val topOffset = layout.getLineStart(line)
+        var crossed = 0
+        for ((_, off) in windowChapterOffsets) {
+            if (off <= topOffset) crossed++ else break
+        }
+        // 每页一个章节标题：视口顶部越过 crossed 个标题，当前章 = winStart + crossed - 1
+        val newPage = (if (crossed == 0) winStart else (winStart + crossed - 1))
+            .coerceIn(0, pageCount.coerceAtLeast(0))
+        if (newPage != currentPageIndex) {
+            currentPageIndex = newPage
+            updatePageLabel(newPage)
+            savePosition()
+        }
+        lastChapterSyncTime = System.currentTimeMillis()
+    }
+
     // ---------------- 设置 ----------------
 
     private fun showThemeDialog() {
@@ -1006,7 +1066,6 @@ class ReaderActivity : AppCompatActivity() {
             .setNegativeButton("取消", null)
             .create()
         dialog.setOnShowListener {
-            // 目录显示时截断过长标题（内部匹配仍用完整标题）
             val labels = chapters.map { it.title.take(50) }.toTypedArray()
             val listView = ListView(this).apply {
                 adapter = object : ArrayAdapter<String>(
@@ -1030,11 +1089,14 @@ class ReaderActivity : AppCompatActivity() {
                 }
                 setOnItemClickListener { _, _, position, _ ->
                     dialog.dismiss()
-                    requestPage(
-                        chapters[position].pageIndex,
-                        scrollToBottom = false,
-                        chapterTitle = chapters[position].title
-                    )
+                    val target = chapters[position]
+                    val inWindow = target.pageIndex in winStart..winEnd
+                    val titleInWindow = inWindow && windowChapterOffsets.any { it.first == target.title }
+                    if (titleInWindow) {
+                        scrollView.post { scrollToChapterTitle(target.title) }
+                    } else {
+                        openWindow(target.pageIndex, scrollToBottom = false, chapterTitle = target.title)
+                    }
                 }
                 post {
                     setSelectionFromTop(currentChapterIndex.coerceAtLeast(0), height / 3)
