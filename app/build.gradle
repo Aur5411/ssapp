@@ -18,8 +18,8 @@ android {
         applicationId "www.soushu2025.com"
         minSdk 21
         targetSdk 34
-                versionCode 62
-        versionName "1.9.84"
+                versionCode 63
+        versionName "1.9.85"
     }
 
     signingConfigs {

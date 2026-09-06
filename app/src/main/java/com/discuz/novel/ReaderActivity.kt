@@ -59,6 +59,10 @@ class ReaderActivity : AppCompatActivity() {
         private const val PREFACE_MIN_CHARS = 2000
         // 章节标题间隔小于此字符数视为「目录」密集排列，跳过目录
         private const val MIN_CHAPTER_GAP = 200
+        // 相邻两个「章节标题」间隔小于此字符数，判定前者是「卷/部」级空壳容器（其标题后紧跟更细的章/正文标题）。
+        // 这种容器若单独成页会得到极短空页（如"第一卷\n"后紧跟"第一章"仅隔几字），打开即"只见几字且翻不动"，
+        // 因此从正文分页中剔除，让实际正文章节落在页首。
+        private const val CONTAINER_MIN_GAP = 60
 
         private const val PAGE_PADDING_DP = 18
     }
@@ -409,6 +413,33 @@ class ReaderActivity : AppCompatActivity() {
             bodyStarts = chapterStarts.subList(bodyStartIndex, chapterStarts.size)
             bodyTitles = chapterTitles.subList(bodyStartIndex, chapterTitles.size)
         }
+
+        // 剔除「卷/部」级空壳容器标题：某标题与下一个标题相距极短（说明它是容器，正文在其后一章才开始），
+        // 则它不应单独占一页。反复剔除直到无过近相邻标题，避免连续多级容器（卷→部→章）层层留壳。
+        var bs = bodyStarts
+        var bt = bodyTitles
+        if (bs.size >= 2) {
+            var changed: Boolean
+            do {
+                changed = false
+                val keptS = mutableListOf<Long>()
+                val keptT = mutableListOf<String>()
+                var i = 0
+                while (i < bs.size) {
+                    // 当前标题与下一个标题过近 → 当前是空壳容器，剔除
+                    if (i < bs.size - 1 && bs[i + 1] - bs[i] < CONTAINER_MIN_GAP) {
+                        i++
+                        changed = true
+                        continue
+                    }
+                    keptS.add(bs[i]); keptT.add(bt[i])
+                    i++
+                }
+                bs = keptS; bt = keptT
+            } while (changed)
+        }
+        bodyStarts = bs
+        bodyTitles = bt
 
         // 章节对齐分页：跳过过短的前言（广告/书名等），让章节标题落在页首、打开直接进正文
         val pageStarts = mutableListOf<Long>()
