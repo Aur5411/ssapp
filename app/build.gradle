@@ -18,8 +18,8 @@ android {
         applicationId "www.soushu2030.com"
         minSdk 21
         targetSdk 34
-        versionCode 70
-        versionName "1.9.92"
+        versionCode 71
+        versionName "1.9.93"
     }
 
     signingConfigs {
@@ -28,6 +28,10 @@ android {
             storePassword keystoreProperties['storePassword']
             keyAlias keystoreProperties['keyAlias']
             keyPassword keystoreProperties['keyPassword']
+            // 签名方案加固：同时启用 v1(JAR) + v2 + v3，最大化兼容性与安全性
+            enableV1Signing = true
+            enableV2Signing = true
+            enableV3Signing = true
         }
     }
 
