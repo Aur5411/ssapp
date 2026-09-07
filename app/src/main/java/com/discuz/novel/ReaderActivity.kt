@@ -390,7 +390,8 @@ class ReaderActivity : AppCompatActivity() {
                     // 行尾章节标记（正文末尾的"第N章/序章/番外"）：分章点设在该行末尾
                     val m = chapterTailRegex.find(title)
                     if (m != null && title.substring(0, m.range.first).isNotBlank()) {
-                        chapterStarts.add(lineStart + title.length)
+                        // 分章点 = 标记开始处（窗口从标题开始，跳转才能正确定位）
+                        chapterStarts.add(lineStart + m.range.first)
                         chapterTitles.add(m.value.replace('\u00A0', ' ').trim { isIndentChar(it) })
                     }
                 }
@@ -748,15 +749,27 @@ class ReaderActivity : AppCompatActivity() {
                 sb.append('\n')
                 continue
             }
-            val isTitle = isChapterTitle(para)
-            val display = if (isTitle) para else "　　$para"
-            if (sb.isNotEmpty()) {
+            val trimmed = para.trim { it == ' ' || it == '\t' || it == '\u3000' }
+            if (isChapterTitle(trimmed)) {
+                if (sb.isNotEmpty()) sb.append('\n')
+                offsets.add(trimmed to sb.length)
+                sb.append(trimmed)
+                continue
+            }
+            // 行尾章节标记：把"正文…第N章"拆成「正文段落 + 标题行」
+            val m = chapterTailRegex.find(para)
+            if (m != null && para.substring(0, m.range.first).isNotBlank()) {
+                val body = para.substring(0, m.range.first).trimEnd()
+                val tailTitle = m.value.trim { it == ' ' || it == '\t' || it == '\u3000' }
+                if (sb.isNotEmpty()) sb.append('\n')
+                sb.append("　　$body")
                 sb.append('\n')
+                offsets.add(tailTitle to sb.length)
+                sb.append(tailTitle)
+                continue
             }
-            if (isTitle) {
-                offsets.add(para to sb.length)
-            }
-            sb.append(display)
+            if (sb.isNotEmpty()) sb.append('\n')
+            sb.append("　　$para")
         }
         return RenderedText(sb, offsets)
     }
@@ -994,18 +1007,19 @@ class ReaderActivity : AppCompatActivity() {
         }
     }
 
-    /** 滚动停止后：根据视口顶部所在位置同步当前章（用于目录高亮与进度保存）。 */
+    /** 滚动停止后：根据视口中部所在位置同步当前章（用于目录高亮与进度保存）。 */
     private fun syncCurrentChapter() {
         val layout = tvContent.layout ?: return
         if (windowChapterOffsets.isEmpty()) return
-        val topY = scrollView.scrollY
-        val line = layout.getLineForVertical(topY)
-        val topOffset = layout.getLineStart(line)
+        // 用视口中部（而非顶部）判断当前章，避免下一章标题刚滑到顶部就被误判为已进入下一章
+        val midY = scrollView.scrollY + scrollView.height / 2
+        val line = layout.getLineForVertical(midY)
+        val midOffset = layout.getLineStart(line)
         var crossed = 0
         for ((_, off) in windowChapterOffsets) {
-            if (off <= topOffset) crossed++ else break
+            if (off <= midOffset) crossed++ else break
         }
-        // 每页一个章节标题：视口顶部越过 crossed 个标题，当前章 = winStart + crossed - 1
+        // 每页一个章节标题：视口中部越过 crossed 个标题，当前章 = winStart + crossed - 1
         val newPage = (if (crossed == 0) winStart else (winStart + crossed - 1))
             .coerceIn(0, pageCount.coerceAtLeast(0))
         if (newPage != currentPageIndex) {
