@@ -347,13 +347,36 @@ class DownloadsActivity : AppCompatActivity() {
     private fun openDownloadDir() {
         val dirName = Prefs.getDownloadDir(this)
         val docId = "primary:Download/$dirName"
-        // 1) 浏览模式打开子目录（弹出应用选择器，第三方文件管理器可浏览并打开文件）
+        // 1) 优先用系统自带文件管理器(DocumentsUI)直接打开，不弹选择器
+        if (tryOpenWithSystemDocumentsUi(docId)) return
+        // 2) 浏览模式打开子目录（弹出应用选择器，第三方文件管理器可浏览并打开文件）
         if (tryBrowseDir(docId)) return
-        // 2) 系统下载管理器（浏览模式，能打开文件，但为 Download 根目录）
+        // 3) 系统下载管理器（浏览模式，能打开文件，但为 Download 根目录）
         if (tryStart(Intent(DownloadManager.ACTION_VIEW_DOWNLOADS))) return
-        // 3) SAF 选目录（最后兜底，能定位子目录但无法点文件打开）
+        // 4) SAF 选目录（最后兜底，能定位子目录但无法点文件打开）
         if (tryOpenSaf(docId)) return
         Toast.makeText(this, "无法打开下载目录，请用系统文件管理器手动打开 Download/$dirName", Toast.LENGTH_LONG).show()
+    }
+
+    /** 优先用系统自带 DocumentsUI 文件管理器直接打开目录（不弹选择器） */
+    private fun tryOpenWithSystemDocumentsUi(documentId: String): Boolean {
+        return try {
+            val uri = DocumentsContract.buildDocumentUri("com.android.externalstorage.documents", documentId)
+            for (mime in listOf(DocumentsContract.Document.MIME_TYPE_DIR, "resource/folder", "inode/directory")) {
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mime)
+                        setPackage("com.google.android.documentsui")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    startActivity(intent)
+                    return true
+                } catch (e: Exception) { /* 尝试下一个 MIME */ }
+            }
+            false
+        } catch (e: Exception) {
+            false
+        }
     }
 
     /** 浏览模式打开目录：弹出「选择文件管理器」，第三方文件管理器可浏览并直接打开文件 */

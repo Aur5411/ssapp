@@ -27,6 +27,10 @@ object ScriptManager {
         sb.append('\n')
         // 自动回复固定启用：与桌面自动回复脚本 v2.2.6 保持一致
         sb.append(autoReplyJs())
+        sb.append('\n')
+        // 附件「重新下载」自动重试：免银币脚本伪造签名下载时，Discuz 会返回
+        // 「原附件链接已失效」提示页，页内有「点击这里重新下载」链接；自动点击之完成下载。
+        sb.append(retryAttachmentJs())
         val custom = Prefs.getCustomJs(ctx).trim()
         if (custom.isNotEmpty()) {
             if (sb.isNotEmpty()) sb.append('\n')
@@ -458,6 +462,38 @@ object ScriptManager {
   }
   if(document.readyState==='complete'){ schedule(); }
   else { window.addEventListener('load', schedule); }
+})();
+""".trimIndent()
+    }
+
+    /**
+     * 附件「重新下载」自动重试。
+     *
+     * 背景：免银币下载脚本会把附件链接改造成伪造签名 `?mod=attachment&aid=<base64(aid|1|1|1|tid)>`，
+     * 点击后 Discuz 校验签名失败，返回「提示信息：抱歉，原附件链接已失效」页面；该页
+     * `#messagetext` 内含「点击这里重新下载」链接（href 为带真实签名、uid=1 的下载地址）。
+     * 这里检测到该提示页时自动点击「重新下载」链接，走现有下载链路直接下载，无需用户手动点。
+     */
+    private fun retryAttachmentJs(): String {
+        return """
+(function(){
+  if(window.__dzRetryAttach) return; window.__dzRetryAttach=1;
+  try{
+    var mt = document.getElementById('messagetext');
+    if(!mt) return;
+    var txt = (mt.textContent || mt.innerText || '');
+    if(txt.indexOf('原附件链接已失效') < 0 && txt.indexOf('重新下载') < 0) return;
+    var link = mt.querySelector('a[href*="mod=attachment"]') || mt.querySelector('a[href*="aid="]');
+    if(link){
+      var href = link.getAttribute('href') || link.href || '';
+      if(href && href.indexOf('mod=attachment') >= 0){
+        // 延迟一点确保页面稳定，再触发导航（走 shouldOverrideUrlLoading 的附件拦截→下载）
+        setTimeout(function(){
+          try{ window.location.href = href; }catch(e){}
+        }, 300);
+      }
+    }
+  }catch(e){}
 })();
 """.trimIndent()
     }

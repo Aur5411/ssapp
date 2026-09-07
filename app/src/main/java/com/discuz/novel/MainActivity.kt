@@ -231,6 +231,11 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
                 val url = request?.url?.toString() ?: return false
                 DebugLog.log("NAV", url)
+                // 免银币伪造签名链接：静默后台下载，不导航跳转
+                if (isFakeFreeDownloadUrl(url)) {
+                    handleFreeSilverDownload(url)
+                    return true
+                }
                 if (isDirectAttachmentUrl(url)) {
                     if (shouldHandleAttachment(url)) {
                         startDirectAttachment(url)
@@ -246,6 +251,10 @@ class MainActivity : AppCompatActivity() {
             override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
                 if (url != null) {
                     DebugLog.log("NAV", url)
+                    if (isFakeFreeDownloadUrl(url)) {
+                        handleFreeSilverDownload(url)
+                        return true
+                    }
                     if (isDirectAttachmentUrl(url)) {
                         if (isFirstAttachmentRequest(url)) {
                             DebugLog.log("DOWNLOAD", "附件第一次请求，放行不处理: $url")
@@ -1011,6 +1020,52 @@ class MainActivity : AppCompatActivity() {
 """.trimIndent()
         pendingFetchUrl = url
         webView.evaluateJavascript(js, null)
+    }
+
+    /**
+     * 判断是否为「免银币下载」伪造签名链接：URL 含 mod=attachment，aid 为 base64，
+     * 解码后形如 `aid|sign|timestamp|uid|tid`，其中 sign 与 timestamp 都被脚本写成 `1`。
+     */
+    private fun isFakeFreeDownloadUrl(url: String): Boolean {
+        if (!isDirectAttachmentUrl(url)) return false
+        val m = Regex("[?&]aid=([^&]+)").find(url) ?: return false
+        val aid = m.groupValues[1]
+        return try {
+            val decoded = String(
+                android.util.Base64.decode(
+                    android.net.Uri.decode(aid).replace(' ', '+'),
+                    android.util.Base64.DEFAULT
+                ),
+                Charsets.UTF_8
+            )
+            val parts = decoded.split('|')
+            parts.size >= 4 && parts[1] == "1" && parts[2] == "1"
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    /**
+     * 「免银币下载」静默处理：伪造签名链接不导航 WebView，后台请求解析出
+     * 「重新下载」真实链接后直接下载，页面保持当前帖子页不动。
+     */
+    private fun handleFreeSilverDownload(url: String) {
+        val cleanUrl = url.replace("&amp;", "&")
+        val referer = lastContentPageUrl ?: webView.url
+        DebugLog.log("FREE-DL", "静默免银币下载: $cleanUrl | referer=$referer")
+        Toast.makeText(this, "开始下载…", Toast.LENGTH_SHORT).show()
+        Thread {
+            val real = DownloadHelper.resolveFreeSilverDownload(cachedUserAgent, cleanUrl, referer)
+            runOnUiThread {
+                if (isFinishing || isDestroyed) return@runOnUiThread
+                if (real != null) {
+                    DebugLog.log("FREE-DL", "解析到真实链接，静默下载: $real")
+                    onDownloadStart(real, null, null)
+                } else {
+                    Toast.makeText(this, "下载失败：未能解析到附件地址", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     /** 论坛附件端点：不要把附件跳转页交给 WebView 渲染，直接走自研下载器。 */

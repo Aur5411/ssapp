@@ -328,6 +328,56 @@ object DownloadHelper {
         }
     }
 
+    /**
+     * 「免银币下载」静默解析：给定伪造签名的下载链接（aid=base64(aid|1|1|1|tid)），
+     * 请求后 Discuz 返回「原附件链接已失效」提示页，页内「点击这里重新下载」链接才是
+     * 带真实签名、uid=1（免币）的有效下载地址。这里请求并解析出该真实地址，返回绝对 URL，
+     * 失败返回 null。整个过程不导航 WebView，供后台静默下载。
+     */
+    fun resolveFreeSilverDownload(userAgent: String, fakeUrl: String, referer: String?): String? {
+        var currentUrl = fakeUrl
+        val currentReferer = referer ?: fakeUrl
+        var conn = openConn(userAgent, currentUrl, currentReferer)
+        var hops = 0
+        try {
+            while (hops++ < 5) {
+                conn.connect()
+                val code = conn.responseCode
+                applySetCookies(conn, currentUrl)
+                if (code in 300..399) {
+                    val loc = conn.getHeaderField("Location")
+                    conn.disconnect()
+                    if (loc.isNullOrBlank()) return null
+                    currentUrl = resolveUrl(currentUrl, loc)
+                    conn = openConn(userAgent, currentUrl, currentReferer)
+                    continue
+                }
+                if (code !in 200..299) {
+                    conn.disconnect()
+                    return null
+                }
+                break
+            }
+            val body = conn.inputStream.use { input ->
+                val buf = ByteArray(1024 * 1024)
+                var n = 0
+                while (n < buf.size) {
+                    val r = input.read(buf, n, buf.size - n)
+                    if (r < 0) break
+                    n += r
+                }
+                buf.copyOf(n)
+            }
+            conn.disconnect()
+            val target = findRedirectInHtml(body, currentUrl)
+            DebugLog.log("FREE-DL", "免银币解析: ${target ?: "未找到"}")
+            return target
+        } catch (e: Exception) {
+            try { conn.disconnect() } catch (_: Exception) {}
+            return null
+        }
+    }
+
     /** 明确的二进制/文档文件 MIME（不含任何 text/xml/json 表单类） */
     private fun isBinaryContentType(ct: String): Boolean {
         if (ct.isBlank()) return true   // 无 Content-Type 时无法判断，保守按文件处理(后续靠扩展名/下载器兜底)
