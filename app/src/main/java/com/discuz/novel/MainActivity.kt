@@ -198,6 +198,14 @@ class MainActivity : AppCompatActivity() {
             settings.setGeolocationEnabled(false)
         } catch (e: Exception) { /* 忽略 */ }
 
+        // 安全加固：关闭本地文件访问，防止网页读取本地文件
+        settings.allowFileAccess = false
+        settings.allowContentAccess = false
+        @Suppress("DEPRECATION")
+        settings.allowFileAccessFromFileURLs = false
+        @Suppress("DEPRECATION")
+        settings.allowUniversalAccessFromFileURLs = false
+
         // JS 桥接：浏览器通道下载（页面内 fetch）分块回传使用
         webView.addJavascriptInterface(DownloadBridge(), "DiscuzApp")
 
@@ -244,6 +252,7 @@ class MainActivity : AppCompatActivity() {
                     DebugLog.log("DOWNLOAD", "附件第一次请求，放行不处理: $url")
                     return false
                 }
+                if (interceptExternalNav(url)) return true
                 return handleUrl(url)
             }
 
@@ -263,6 +272,7 @@ class MainActivity : AppCompatActivity() {
                         startDirectAttachment(url)
                         return true
                     }
+                    if (interceptExternalNav(url)) return true
                 }
                 return url?.let { handleUrl(it) } ?: false
             }
@@ -290,8 +300,17 @@ class MainActivity : AppCompatActivity() {
             override fun onReceivedSslError(
                 view: WebView?, handler: android.webkit.SslErrorHandler?, error: android.net.http.SslError?
             ) {
-                DebugLog.log("SSL", "忽略证书错误: ${error?.url} (${error?.primaryError})")
-                handler?.proceed()   // 放行过期/不匹配证书，继续加载
+                // 安全加固：仅对「发布入口」域名(soushu2030 等，证书确实过期)放行证书错误，
+                // 保持自动获取最新地址功能；论坛主站等其余域名证书应有效，出现错误必是攻击 → 拒绝。
+                val errUrl = error?.url ?: ""
+                val isEntry = isEntryHostUrl(errUrl)
+                if (isEntry) {
+                    DebugLog.log("SSL", "放行发布入口证书错误: $errUrl")
+                    handler?.proceed()
+                } else {
+                    DebugLog.log("SSL", "拒绝证书错误: $errUrl")
+                    handler?.cancel()
+                }
             }
 
             /**
@@ -737,6 +756,32 @@ class MainActivity : AppCompatActivity() {
         if (url.isNullOrBlank()) return false
         val low = url.lowercase()
         return entryHostMarkers.any { low.contains(it) }
+    }
+
+    /**
+     * 安全加固：拦截站外 http(s) 链接，交给系统浏览器打开（不在 App 内 WebView 加载），
+     * 避免 JS 桥暴露给任意第三方页面。论坛主站域名(设置/最近页面)与发布入口域名放行。
+     */
+    private fun interceptExternalNav(url: String): Boolean {
+        if (!url.startsWith("http://") && !url.startsWith("https://")) return false
+        if (isEntryHostUrl(url)) return false
+        val h = try { Uri.parse(url).host?.lowercase()?.trim() } catch (e: Exception) { null }
+            ?: return false
+        val allowedHosts = mutableListOf<String>()
+        Prefs.getUrl(this).let { u ->
+            try { Uri.parse(u).host?.lowercase()?.trim()?.let { allowedHosts.add(it) } } catch (_: Exception) {}
+        }
+        lastContentPageUrl?.let { u ->
+            try { Uri.parse(u).host?.lowercase()?.trim()?.let { allowedHosts.add(it) } } catch (_: Exception) {}
+        }
+        if (allowedHosts.any { h == it || h.endsWith(".$it") }) return false
+        DebugLog.log("NAV", "站外链接转系统浏览器: $url")
+        try {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        } catch (e: Exception) {
+            Toast.makeText(this, "无法打开链接", Toast.LENGTH_SHORT).show()
+        }
+        return true
     }
 
     /** 记录浏览历史（仅真实 http(s) 页面，排除 about:blank/data:） */

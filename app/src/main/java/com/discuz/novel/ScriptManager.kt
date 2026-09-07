@@ -50,6 +50,7 @@ object ScriptManager {
         return """
 (function(){
   var css='#float_left,#float_right,.a_pt,.a_pb,.a_pr,.a_mu,.a_fl,.a_fr,#scbar_ad,#ad_content,.float_ad,#right_ads,.ads,.adbox,a[href*="cpro.baidu.com"],iframe[src*="pos.baidu.com"],div[id^="ad_"]{display:none !important;}';
+  css+='.t_f img,.t_f a[href*="mod=attachment"] img,td.t_f img,img[id^="aimg_"],img.zoom{display:none!important;}';
   try{
     var s=document.createElement('style');
     s.type='text/css';
