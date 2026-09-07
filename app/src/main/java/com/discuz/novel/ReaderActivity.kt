@@ -112,6 +112,12 @@ class ReaderActivity : AppCompatActivity() {
         RegexOption.IGNORE_CASE
     )
 
+    /** 行尾章节标记：正文末尾的「第N章/序章/番外」等（如"…沙曼也消失了。第1章"），表示本章至此结束、下一章从下一行开始 */
+    private val chapterTailRegex = Regex(
+        "(第[ \\t\\u3000]*[0-9０-９零〇一二三四五六七八九十百千万两]+[ \\t\\u3000]*[章卷回部节集话篇轮幕折更]|Chapter[ \\t\\u3000]*[0-9０-９]+|序章|楔子|番外篇?|尾声|后记|前言|引子|终章|大结局)[ \\t\\u3000]*$",
+        RegexOption.IGNORE_CASE
+    )
+
     private lateinit var root: View
     private lateinit var scrollView: ScrollView
     private lateinit var tvContent: TextView
@@ -375,9 +381,19 @@ class ReaderActivity : AppCompatActivity() {
         fun processLine() {
             if (lineBuf.isEmpty()) return
             val title = lineBuf.toString()
-            if (chapterTitles.size < MAX_CHAPTERS && isChapterTitle(title)) {
-                chapterStarts.add(lineStart)
-                chapterTitles.add(title.replace('\u00A0', ' ').trim { isIndentChar(it) })
+            if (chapterTitles.size < MAX_CHAPTERS) {
+                if (isChapterTitle(title)) {
+                    // 整行 = 章节标题：分章点在行首
+                    chapterStarts.add(lineStart)
+                    chapterTitles.add(title.replace('\u00A0', ' ').trim { isIndentChar(it) })
+                } else {
+                    // 行尾章节标记（正文末尾的"第N章/序章/番外"）：分章点设在该行末尾
+                    val m = chapterTailRegex.find(title)
+                    if (m != null && title.substring(0, m.range.first).isNotBlank()) {
+                        chapterStarts.add(lineStart + title.length)
+                        chapterTitles.add(m.value.replace('\u00A0', ' ').trim { isIndentChar(it) })
+                    }
+                }
             }
             lineBuf.setLength(0)
         }
