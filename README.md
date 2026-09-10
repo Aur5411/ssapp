@@ -1,6 +1,6 @@
-# 搜书吧（Discuz! X3.4 小说论坛客户端）
+# 搜书吧app
 
-一个基于 **Android WebView** 的 Discuz! X3.4 小说论坛壳应用，当前版本 **v1.9.93**。
+一个基于 **Android WebView** 的 Discuz! X3.4 小说论坛壳应用
 
 ## 功能特性
 
