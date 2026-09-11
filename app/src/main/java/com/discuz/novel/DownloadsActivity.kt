@@ -12,10 +12,10 @@ import android.provider.DocumentsContract
 import android.graphics.Color
 import android.text.Editable
 import android.text.TextWatcher
-import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.ArrayAdapter
+import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.ListView
@@ -32,7 +32,12 @@ import java.util.Locale
 /**
  * 下载文件管理页：列出 Download/自定义目录 中的所有文件
  * - 点击：调用系统应用打开
- * - 长按：确认后删除
+ * - 长按：进入多选，选完点右上按钮批量处理
+ *
+ * 批量处理两种模式（默认前者，安全）：
+ *  1) 不勾「同时删除本地文件」→ 只把这批文件从下载列表里移除（写进 DownloadRecords，
+ *     本地文件原封不动，之后还能点「恢复已移除记录」找回来）；
+ *  2) 勾上「同时删除本地文件」→ 真删本地文件，不可恢复。
  */
 class DownloadsActivity : AppCompatActivity() {
 
@@ -52,8 +57,10 @@ class DownloadsActivity : AppCompatActivity() {
     private lateinit var emptyView: TextView
     private lateinit var selectionBar: View
     private lateinit var checkAll: CheckBox
+    private lateinit var chkDeleteLocal: CheckBox
     private lateinit var selectedCount: TextView
-    private lateinit var deleteSelected: View
+    private lateinit var deleteSelected: Button
+    private lateinit var restoreRecords: Button
     private var selectionMode = false
     private val selected = mutableSetOf<String>()
 
@@ -69,11 +76,16 @@ class DownloadsActivity : AppCompatActivity() {
         emptyView = findViewById(R.id.emptyView)
         selectionBar = findViewById(R.id.selectionBar)
         checkAll = findViewById(R.id.checkAll)
+        chkDeleteLocal = findViewById(R.id.chkDeleteLocal)
         selectedCount = findViewById(R.id.selectedCount)
         deleteSelected = findViewById(R.id.btnDeleteSelected)
+        restoreRecords = findViewById(R.id.btnRestoreRecords)
 
         // 打开本地下载目录
         findViewById<View>(R.id.btnOpenDir).setOnClickListener { openDownloadDir() }
+
+        // 恢复被移除的列表记录（只还原列表，不下载任何东西）
+        restoreRecords.setOnClickListener { confirmRestoreRecords() }
 
         // 搜索框：输入即时过滤已下载文件
         searchInput.addTextChangedListener(object : TextWatcher {
@@ -92,7 +104,11 @@ class DownloadsActivity : AppCompatActivity() {
                 renderList()
             }
         }
-        deleteSelected.setOnClickListener { confirmDeleteSelected() }
+        // 勾选状态变化时，按钮文案跟着变（移除记录 / 删除文件）
+        chkDeleteLocal.setOnCheckedChangeListener { _, _ -> updateSelectionUi() }
+        deleteSelected.setOnClickListener {
+            if (chkDeleteLocal.isChecked) confirmDeleteLocal() else confirmRemoveRecords()
+        }
         listView.setOnItemClickListener { _, _, position, _ ->
             val item = filteredItems[position]
             if (selectionMode) {
@@ -167,6 +183,12 @@ class DownloadsActivity : AppCompatActivity() {
             }
         }
 
+        // 过滤掉「已从列表移除」的记录（只影响列表显示，本地文件没动过）
+        val hidden = DownloadRecords.hidden(this)
+        if (hidden.isNotEmpty()) {
+            items.removeAll { DownloadRecords.keyOf(it.name, it.size, it.time) in hidden }
+        }
+
         selected.retainAll(items.map { keyOf(it) })
         applyFilter()
         renderList()
@@ -175,9 +197,27 @@ class DownloadsActivity : AppCompatActivity() {
     private fun keyOf(item: Item): String = item.uri?.toString() ?: item.file?.absolutePath ?: item.name
 
     private fun renderList() {
+        val removed = DownloadRecords.count(this)
+
+        // 空列表提示：区分「真的没有文件」和「记录被移除过」
+        if (filteredItems.isEmpty()) {
+            emptyView.text = if (query.isBlank() && removed > 0) {
+                "列表已清空（本地文件仍在，未被删除）\n点上方「恢复已移除记录」可还原列表"
+            } else if (query.isBlank()) {
+                "暂无下载文件"
+            } else {
+                "没有匹配「$query」的文件"
+            }
+        }
         emptyView.visibility = if (filteredItems.isEmpty()) View.VISIBLE else View.GONE
+
+        // 有移除记录时才显示恢复按钮，并把条数写在按钮上
+        restoreRecords.visibility = if (removed > 0) View.VISIBLE else View.GONE
+        if (removed > 0) restoreRecords.text = "恢复已移除记录（$removed）"
+
         selectedCount.text = "已选 ${selected.size} 项"
         deleteSelected.isEnabled = selected.isNotEmpty()
+        deleteSelected.text = if (chkDeleteLocal.isChecked) "删除文件" else "移除记录"
         val adapter = object : ArrayAdapter<Item>(this, 0, filteredItems) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
                 val row = convertView ?: layoutInflater.inflate(R.layout.item_download, parent, false)
@@ -205,6 +245,7 @@ class DownloadsActivity : AppCompatActivity() {
         selectionBar.visibility = if (selectionMode) View.VISIBLE else View.GONE
         selectedCount.text = "已选 ${selected.size} 项"
         deleteSelected.isEnabled = selected.isNotEmpty()
+        deleteSelected.text = if (chkDeleteLocal.isChecked) "删除文件" else "移除记录"
         checkAll.setOnCheckedChangeListener(null)
         checkAll.isChecked = filteredItems.isNotEmpty() && selected.size == filteredItems.size
         checkAll.setOnCheckedChangeListener { _, checked ->
@@ -282,65 +323,95 @@ class DownloadsActivity : AppCompatActivity() {
         }
     }
 
-    private fun confirmDeleteSelected() {
+    // ---------------------------------------------------------------- 批量处理
+
+    /** 默认动作：只把选中项从下载列表里移除，本地文件保留。 */
+    private fun confirmRemoveRecords() {
         val targets = items.filter { selected.contains(keyOf(it)) }
         if (targets.isEmpty()) return
-        AlertDialog.Builder(this).setTitle("删除选中文件")
-            .setMessage("确定删除 ${targets.size} 个文件吗？")
-            .setPositiveButton("删除") { _, _ ->
-                targets.forEach { deleteItem(it) }
-                selected.clear()
-                selectionMode = false
+        val dirName = Prefs.getDownloadDir(this)
+        AlertDialog.Builder(this)
+            .setTitle("从列表移除")
+            .setMessage(
+                "把选中的 ${targets.size} 项从下载列表里去掉？\n\n" +
+                    "本地文件不会被删除，仍然在 Download/$dirName 目录里，" +
+                    "可以随时点「打开下载目录」查看，也能用「恢复已移除记录」还原列表。"
+            )
+            .setPositiveButton("移除记录") { _, _ ->
+                DownloadRecords.hide(
+                    this,
+                    targets.map { DownloadRecords.keyOf(it.name, it.size, it.time) }
+                )
+                val n = targets.size
+                exitSelection()
+                Toast.makeText(this, "已从列表移除 $n 项，本地文件保留", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 勾选「同时删除本地文件」后的动作：真删本地文件，不可恢复。 */
+    private fun confirmDeleteLocal() {
+        val targets = items.filter { selected.contains(keyOf(it)) }
+        if (targets.isEmpty()) return
+        AlertDialog.Builder(this)
+            .setTitle("删除本地文件")
+            .setMessage(
+                "确定要删除选中的 ${targets.size} 个本地文件吗？\n\n" +
+                    "删除后无法恢复，也不会进回收站。\n" +
+                    "只想清空列表、保留文件的话，请先取消勾选「同时删除本地文件」。"
+            )
+            .setPositiveButton("删除文件") { _, _ ->
+                var ok = 0
+                targets.forEach {
+                    if (deleteItem(it)) ok++
+                    // 文件已删，对应的移除记录一并清掉，免得同名的新文件被误隐藏
+                    DownloadRecords.reveal(
+                        this,
+                        listOf(DownloadRecords.keyOf(it.name, it.size, it.time))
+                    )
+                }
+                val n = targets.size
+                exitSelection()
+                Toast.makeText(
+                    this,
+                    if (ok == n) "已删除 $n 个本地文件" else "已删除 $ok/$n 个文件，部分失败",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 把所有被移除的记录恢复到列表里（只还原列表显示，不下载任何文件）。 */
+    private fun confirmRestoreRecords() {
+        val n = DownloadRecords.count(this)
+        if (n <= 0) return
+        AlertDialog.Builder(this)
+            .setTitle("恢复已移除的记录")
+            .setMessage("把 $n 条被移除的记录重新显示在列表里？\n不会下载任何文件，只是还原列表显示。")
+            .setPositiveButton("恢复") { _, _ ->
+                DownloadRecords.clear(this)
+                Toast.makeText(this, "已恢复 $n 条记录", Toast.LENGTH_SHORT).show()
                 loadFiles()
-            }.setNegativeButton("取消", null).show()
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 退出多选状态并刷新列表；勾选状态一并复位（下次进来仍是安全的默认行为） */
+    private fun exitSelection() {
+        selected.clear()
+        selectionMode = false
+        selectionBar.visibility = View.GONE
+        chkDeleteLocal.isChecked = false
+        loadFiles()
     }
 
     private fun deleteItem(item: Item): Boolean = when {
         item.uri != null -> contentResolver.delete(item.uri, null, null) > 0
         item.file != null -> item.file.delete()
         else -> false
-    }
-
-    private inner class SwipeDeleteTouchListener : View.OnTouchListener {
-        private var downX = 0f
-        private var downY = 0f
-        override fun onTouch(v: View, event: MotionEvent): Boolean {
-            when (event.actionMasked) {
-                MotionEvent.ACTION_DOWN -> { downX = event.x; downY = event.y }
-                MotionEvent.ACTION_UP -> {
-                    val dx = event.x - downX
-                    if (dx < -160 && kotlin.math.abs(dx) > kotlin.math.abs(event.y - downY) * 1.5f) {
-                        val pos = listView.pointToPosition(event.x.toInt(), event.y.toInt())
-                        if (pos != ListView.INVALID_POSITION) {
-                            val item = items[pos]
-                            AlertDialog.Builder(this@DownloadsActivity).setTitle("删除文件")
-                                .setMessage("确定删除「${item.name}」吗？")
-                                .setPositiveButton("删除") { _, _ -> deleteItem(item); loadFiles() }
-                                .setNegativeButton("取消", null).show()
-                            return true
-                        }
-                    }
-                }
-            }
-            return false
-        }
-    }
-
-    private fun confirmDelete(item: Item) {
-        AlertDialog.Builder(this)
-            .setTitle("删除文件")
-            .setMessage("确定删除「${item.name}」吗？")
-            .setPositiveButton("删除") { _, _ ->
-                val ok = when {
-                    item.uri != null -> contentResolver.delete(item.uri, null, null) > 0
-                    item.file != null -> item.file.delete()
-                    else -> false
-                }
-                Toast.makeText(this, if (ok) "已删除" else "删除失败", Toast.LENGTH_SHORT).show()
-                loadFiles()
-            }
-            .setNegativeButton("取消", null)
-            .show()
     }
 
     /** 用系统文件管理器打开本地下载目录（Download/自定义子目录），多级降级保证可用 */

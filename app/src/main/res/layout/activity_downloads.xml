@@ -28,53 +28,89 @@
         android:textColorHint="#94A3B8"
         android:textSize="15sp" />
 
-    <Button
-        android:id="@+id/btnOpenDir"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginStart="12dp"
         android:layout_marginTop="8dp"
         android:layout_marginEnd="12dp"
-        android:background="#F1F5F9"
-        android:text="打开下载目录"
-        android:textColor="#1E293B"
-        android:textSize="15sp" />
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/btnOpenDir"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="#F1F5F9"
+            android:text="打开下载目录"
+            android:textColor="#1E293B"
+            android:textSize="15sp" />
+
+        <Button
+            android:id="@+id/btnRestoreRecords"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:background="#F1F5F9"
+            android:textColor="#1E293B"
+            android:textSize="15sp"
+            android:visibility="gone" />
+    </LinearLayout>
 
     <LinearLayout
         android:id="@+id/selectionBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical"
+        android:orientation="vertical"
         android:visibility="gone"
         android:paddingStart="12dp"
         android:paddingTop="6dp"
         android:paddingEnd="8dp"
         android:paddingBottom="6dp">
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <CheckBox
+                android:id="@+id/checkAll"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="全选"
+                android:textColor="#212121" />
+
+            <TextView
+                android:id="@+id/selectedCount"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingStart="8dp"
+                android:text="已选 0 项"
+                android:textColor="#555555"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/btnDeleteSelected"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:enabled="false"
+                android:minWidth="0dp"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="移除记录"
+                android:textColor="#B00020" />
+        </LinearLayout>
+
         <CheckBox
-            android:id="@+id/checkAll"
+            android:id="@+id/chkDeleteLocal"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="全选"
-            android:textColor="#212121" />
-
-        <TextView
-            android:id="@+id/selectedCount"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:paddingStart="8dp"
-            android:text="已选 0 项"
-            android:textColor="#555555"
-            android:textSize="13sp" />
-
-        <Button
-            android:id="@+id/btnDeleteSelected"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:enabled="false"
-            android:text="删除选中"
-            android:textColor="#B00020" />
+            android:layout_marginStart="4dp"
+            android:text="同时删除本地文件（默认只清列表记录）"
+            android:textColor="#212121"
+            android:textSize="14sp" />
     </LinearLayout>
 
     <FrameLayout
