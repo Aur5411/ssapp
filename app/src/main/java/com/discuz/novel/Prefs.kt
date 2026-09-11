@@ -20,6 +20,7 @@ object Prefs {
     private const val KEY_READER_FONT_SIZE = "reader_font_size"
     private const val KEY_READER_POS_PREFIX = "reader_pos_"
     private const val KEY_READER_LINE_SPACING = "reader_line_spacing"
+    private const val KEY_TRUSTED_HOSTS = "trusted_hosts"
 
     private fun sp(ctx: Context): SharedPreferences =
         ctx.getSharedPreferences(NAME, Context.MODE_PRIVATE)
@@ -27,6 +28,21 @@ object Prefs {
     fun getUrl(ctx: Context): String = sp(ctx).getString(KEY_URL, "") ?: ""
 
     fun setUrl(ctx: Context, url: String) = sp(ctx).edit().putString(KEY_URL, url.trim()).apply()
+
+    /**
+     * 可信论坛域名集合：记录「曾经成功作为论坛主站进入过」的主机名。
+     * 论坛是动态域名（如 dq3s.b4e5w4dqwde.com，会随发布页轮换），只有运行期跳转命中后才知道，
+     * 必须持久化记下来，否则下次从发布页跳到该域名时会被站外拦截误踢到系统浏览器。
+     */
+    fun getTrustedHosts(ctx: Context): Set<String> =
+        sp(ctx).getStringSet(KEY_TRUSTED_HOSTS, emptySet())?.toSet() ?: emptySet()
+
+    fun addTrustedHost(ctx: Context, host: String) {
+        val h = host.trim().lowercase()
+        if (h.isBlank()) return
+        val cur = getTrustedHosts(ctx).toMutableSet()
+        if (cur.add(h)) sp(ctx).edit().putStringSet(KEY_TRUSTED_HOSTS, cur).apply()
+    }
 
     /** 去广告引擎：隐藏开关，始终启用。 */
     fun isAdBlock(ctx: Context): Boolean = true

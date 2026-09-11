@@ -86,6 +86,21 @@ class MainActivity : AppCompatActivity() {
     private val ENTRY_WATCHDOG_MS = 6000L   // 进入窗口内未到达内容页视为一次失败
     private val entryHostMarkers = listOf("soushu2030", "soushufabu", "allshu", ".soushu", "book/", "/o/")
 
+    /**
+     * 发布页「最新地址」自动跳转命中的论坛主机名。
+     * 论坛是动态域名（如 dq3s.b4e5w4dqwde.com，随发布页轮换），冷启动时并不知道它是谁，
+     * 若不记下来放行，跳过去那一下会被「站外链接转系统浏览器」拦截踢出 App，导致永远进不了论坛。
+     */
+    @Volatile private var entryTrustedHost: String? = null
+
+    /**
+     * 是否已经发起过「直达最新地址」的跳转。
+     * 一旦发出，说明入口链路已经走通、目标就是论坛，此时应给页面更宽的加载时间；
+     * 否则论坛本身响应慢（>6s）时看门狗会误判失败并重启整条链路，反复来回永远进不去。
+     */
+    @Volatile private var autoJumpIssued = false
+    private val ENTRY_WATCHDOG_AFTER_JUMP_MS = 15000L
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         applyHighRefreshRate()   // 适配高刷新率屏幕（90Hz/120Hz 自动切最高刷新率）
@@ -244,13 +259,10 @@ class MainActivity : AppCompatActivity() {
                     handleFreeSilverDownload(url)
                     return true
                 }
+                // 附件：每次点击直接接管下载，不再「第一次放行、第二次才下载」
                 if (isDirectAttachmentUrl(url)) {
-                    if (shouldHandleAttachment(url)) {
-                        startDirectAttachment(url)
-                        return true
-                    }
-                    DebugLog.log("DOWNLOAD", "附件第一次请求，放行不处理: $url")
-                    return false
+                    startDirectAttachment(url)
+                    return true
                 }
                 if (interceptExternalNav(url)) return true
                 return handleUrl(url)
@@ -264,11 +276,8 @@ class MainActivity : AppCompatActivity() {
                         handleFreeSilverDownload(url)
                         return true
                     }
+                    // 附件：每次点击直接接管下载，不再「第一次放行、第二次才下载」
                     if (isDirectAttachmentUrl(url)) {
-                        if (isFirstAttachmentRequest(url)) {
-                            DebugLog.log("DOWNLOAD", "附件第一次请求，放行不处理: $url")
-                            return false
-                        }
                         startDirectAttachment(url)
                         return true
                     }
@@ -414,12 +423,9 @@ class MainActivity : AppCompatActivity() {
                         if (!url.isNullOrBlank() && (url.startsWith("http://") || url.startsWith("https://"))) {
                             runOnUiThread {
                                 if (isDirectAttachmentUrl(url)) {
-                                    if (shouldHandleAttachment(url)) {
-                                        v?.stopLoading()
-                                        startDirectAttachment(url)
-                                    } else {
-                                        DebugLog.log("DOWNLOAD", "附件第一次请求，等待第二次: $url")
-                                    }
+                                    // 附件：直接接管下载，不再等第二次点击
+                                    v?.stopLoading()
+                                    startDirectAttachment(url)
                                 } else {
                                     forwardPopupUrl(url)
                                 }
@@ -636,6 +642,9 @@ class MainActivity : AppCompatActivity() {
         if (isRealHttpPage(pageUrl) && !isEntryHostUrl(pageUrl)) return
         autoJumpAttempt++
         val attempt = autoJumpAttempt
+        // 第一阶段：只「找」不「跳」。跳转改由 Kotlin 在登记完目标域名之后再做 ——
+        // 否则 JS 里 location.href 立刻发起的导航会先于本回调到达(实测早约 140ms)，
+        // 目标域名还没登记就被「站外链接转系统浏览器」拦截踢出 App，冷启动永远进不了论坛。
         val js = """
 (function(){
   try{
@@ -666,25 +675,80 @@ class MainActivity : AppCompatActivity() {
     var target=pick(document.querySelectorAll('a.link,a[href]'));
     info.target=target||'';
     info.cand=target?1:0;
-    if(!target || info.jumped) return JSON.stringify(info);
-    window.__dzAutoJumped=1;
-    window.location.href = target;   // 主框架直达，绕开 target=_blank 弹窗链路
-    info.jumped=true;
     return JSON.stringify(info);
   }catch(e){ return JSON.stringify({err:String(e)}); }
 })();
 """.trimIndent()
         webView.evaluateJavascript(js) { res ->
-            val clean = res?.trim()?.removePrefix("\"")?.removeSuffix("\"") ?: ""
+            // ⚠️ evaluateJavascript 回传的是「被 JSON 编码过一层的字符串」：内层引号是 \"、斜杠是 \/。
+            // 不能直接当 JSON 解析（拿 `"target"` 去匹配 `\"target\"` 永远匹配不到，会导致「找到了目标却不跳」）。
+            // 必须先用 JSONTokener 解一层，拿回原始 JSON 文本再解析。
+            val clean = decodeJsResult(res)
             DebugLog.log("AUTOJUMP", "第${attempt}次 检查$clean")
-            // 未命中且仍在入口链路，短暂后再查(链接可能晚注入)；最多约 4 次覆盖 ~2.5s
-            if (attempt < 4 && entryMode) {
-                val done = clean.contains("\"jumped\":true")
-                val hasCand = clean.contains("\"cand\":1")
-                if (!done && !hasCand) {
-                    webView.postDelayed(autoJumpPollRunnable, 550)
-                }
+            val info = try {
+                if (clean.isBlank() || clean == "null") null else org.json.JSONObject(clean)
+            } catch (_: Exception) { null }
+            val target = info?.optString("target", "")?.takeIf { it.isNotBlank() }
+                ?: extractEscapedField(res, "target")
+            if (target != null) {
+                // 先把目标域名登记下来（内存 + 持久化），再发起跳转，站外拦截才认得它
+                try {
+                    Uri.parse(target).host?.lowercase()?.trim()?.takeIf { it.isNotBlank() }?.let { host ->
+                        if (entryTrustedHost != host) {
+                            entryTrustedHost = host
+                            DebugLog.log("AUTOJUMP", "登记论坛域名: $host")
+                        }
+                        Prefs.addTrustedHost(this, host)
+                    }
+                } catch (_: Exception) {}
+                DebugLog.log("AUTOJUMP", "直达最新地址: $target")
+                // 已确认目标就是论坛：改用更宽的看门狗，等目标页慢慢加载完，避免误判失败重启链路
+                autoJumpIssued = true
+                armEntryWatchdog()
+                // 第二阶段：用 JS 跳转(而非 webView.loadUrl)，保留 Referer，行为与原实现一致
+                val jumpJs = "try{window.__dzAutoJumped=1;window.location.href=" +
+                    org.json.JSONObject.quote(target) + ";}catch(e){}"
+                webView.evaluateJavascript(jumpJs, null)
+                return@evaluateJavascript
             }
+            // 未命中且仍在入口链路，短暂后再查(链接可能晚注入)；最多约 4 次覆盖 ~2.5s
+            if (attempt < 4 && entryMode && info?.optBoolean("jumped", false) != true) {
+                webView.postDelayed(autoJumpPollRunnable, 550)
+            }
+        }
+    }
+
+    /**
+     * 解开 evaluateJavascript 回传值的外层 JSON 编码，拿回 JS 实际返回的字符串。
+     * 例：回调收到 `"{\"url\":\"http:\/\/a\",\"target\":\"https:\/\/b\"}"` → 还原为
+     * `{"url":"http://a","target":"https://b"}`。解析失败时退回朴素去引号（兼容老行为）。
+     */
+    private fun decodeJsResult(res: String?): String {
+        if (res.isNullOrBlank()) return ""
+        return try {
+            when (val v = org.json.JSONTokener(res).nextValue()) {
+                is String -> v
+                else -> res
+            }
+        } catch (_: Exception) {
+            res.trim().removePrefix("\"").removeSuffix("\"")
+        }
+    }
+
+    /**
+     * 兜底：万一解不了一层编码（个别 OEM WebView 回传格式与 AOSP 不同），
+     * 就直接在被转义过的原文里按 `\"field\":\"值\"` 抠出来，并把 `\/` 还原成 `/`。
+     * 值的字符类必须允许 `\/` 这类转义（只用 `[^"\\]` 会在第一个反斜杠处断掉）。
+     */
+    private fun extractEscapedField(raw: String?, field: String): String? {
+        if (raw.isNullOrBlank()) return null
+        val pat = "\\\\?\"" + java.util.regex.Pattern.quote(field) +
+            "\\\\?\"\\s*:\\s*\\\\?\"((?:[^\"\\\\]|\\\\.)*?)\\\\?\""
+        return try {
+            Regex(pat).find(raw)?.groupValues?.get(1)
+                ?.replace("\\/", "/")?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -708,6 +772,7 @@ class MainActivity : AppCompatActivity() {
         // 未配置网址：走固定入口发布页 + 自动跳转 + 智能重试
         entryMode = true
         entryFailCount = 0
+        autoJumpIssued = false
         DebugLog.log("ENTRY", "开始进入论坛（启动）")
         loadUrl("https://www.soushu2030.com")
         armEntryWatchdog()
@@ -741,6 +806,11 @@ class MainActivity : AppCompatActivity() {
             val u = java.net.URL(url)
             val root = "${u.protocol}://${u.host}" +
                 (if (u.port > 0 && u.port != 80 && u.port != 443) ":${u.port}" else "") + "/"
+            // 已成功进入的论坛域名一并记为可信域名：论坛域名会轮换，下次重定向到它时不再被当站外链接
+            u.host?.lowercase()?.trim()?.takeIf { it.isNotBlank() }?.let { h ->
+                entryTrustedHost = h
+                Prefs.addTrustedHost(this, h)
+            }
             val existing = Prefs.getUrl(this)
             if (existing != root) {
                 Prefs.setUrl(this, root)
@@ -774,6 +844,9 @@ class MainActivity : AppCompatActivity() {
         lastContentPageUrl?.let { u ->
             try { Uri.parse(u).host?.lowercase()?.trim()?.let { allowedHosts.add(it) } } catch (_: Exception) {}
         }
+        // 发布页自动跳转命中的论坛域名（运行时才得知的动态域名）与历史记录过的论坛域名
+        entryTrustedHost?.let { allowedHosts.add(it) }
+        try { allowedHosts.addAll(Prefs.getTrustedHosts(this)) } catch (_: Exception) {}
         if (allowedHosts.any { h == it || h.endsWith(".$it") }) return false
         DebugLog.log("NAV", "站外链接转系统浏览器: $url")
         try {
@@ -880,6 +953,7 @@ class MainActivity : AppCompatActivity() {
         entryFailCount++
         DebugLog.log("ENTRY", "启动进入失败，第 $entryFailCount/$ENTRY_MAX_RETRY 次")
         if (entryFailCount < ENTRY_MAX_RETRY) {
+            autoJumpIssued = false   // 即将从入口页重走整条链路，跳转标记复位
             armEntryWatchdog()
             webView.postDelayed({
                 // 延迟期间若已成功进入(用户已开始浏览)则不再重试
@@ -909,7 +983,7 @@ class MainActivity : AppCompatActivity() {
             recordEntryFailure()
         }
         entryWatchdog = run
-        webView.postDelayed(run, ENTRY_WATCHDOG_MS)
+        webView.postDelayed(run, if (autoJumpIssued) ENTRY_WATCHDOG_AFTER_JUMP_MS else ENTRY_WATCHDOG_MS)
     }
 
     private fun disarmEntryWatchdog() {
@@ -1119,18 +1193,7 @@ class MainActivity : AppCompatActivity() {
         return l.contains("mod=attachment") || l.contains("attachment.php")
     }
 
-    /** 直接处理附件地址；不显示确认弹窗。 */
-    private val attachmentFirstRequests = java.util.concurrent.ConcurrentHashMap<String, Long>()
-
-    /** 第一次附件请求只放行，第二次（重新下载）才接管。 */
-    private fun shouldHandleAttachment(url: String): Boolean {
-        val now = System.currentTimeMillis()
-        attachmentFirstRequests.entries.removeIf { now - it.value > 120000 }
-        return attachmentFirstRequests.putIfAbsent(url, now) != null
-    }
-
-    private fun isFirstAttachmentRequest(url: String): Boolean = !shouldHandleAttachment(url)
-
+    /** 直接处理附件地址（不显示确认弹窗、不要求二次点击）。 */
     private fun startDirectAttachment(url: String) {
         DebugLog.log("DOWNLOAD", "直接接管附件: $url")
         onDownloadStart(url, null, null)
@@ -1144,9 +1207,9 @@ class MainActivity : AppCompatActivity() {
             DebugLog.log("POPUP", "吞掉: $url")
             return
         }
+        // 附件：直接接管下载，不再等第二次点击
         if (isDirectAttachmentUrl(url)) {
-            if (shouldHandleAttachment(url)) startDirectAttachment(url)
-            else DebugLog.log("DOWNLOAD", "附件第一次请求，等待第二次: $url")
+            startDirectAttachment(url)
             return
         }
         DebugLog.log("POPUP", "转发普通页面到主 WebView: $url")
